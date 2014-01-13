@@ -1,20 +1,6 @@
 defmodule Wubba.Server do
   use GenServer.Behaviour
 
-  @default_options [
-    callback: nil,
-    callback_args: nil,
-    ip: {0,0,0,0}, 
-    port: 8080, 
-    min_acceptors: 20]
-
-  @default_limits [
-    accept_timeout: 10000,
-    request_timeout: 60000,
-    header_timeout: 10000,
-    body_timeout: 30000,
-    max_body_size: 1024000]
-
   @type callback_mod :: module
   @type callback_args :: any
   @type callback :: {callback_mod, callback_args}
@@ -27,27 +13,12 @@ defmodule Wubba.Server do
     callback: nil :: callback
 
 
-  def start_link(options) do
-    case Keyword.get(options, :name) do
-        nil ->
-          :gen_server.start_link(__MODULE__, options, []);
-        name ->
-          :gen_server.start_link(name, __MODULE__, [options], [])
-    end
-  end
-
-
-  def init(options) do
-    
+  def init({options,limits,callback}) do
     # Use the exit signal from the acceptor processes to know when they exit
     :erlang.process_flag(:trap_exit,true)
 
-    options=Wubba.Utils.make_options(options,@default_options)
     {:ok,socket} = start_listener(options)
-    limits = Wubba.Utils.make_options(options,@default_limits)
 
-    callback={options[:callback],options[:callback_args]}
-    
     acceptors = Enum.map 1..options[:min_acceptors], fn _ -> 
       Wubba.Http.start_link(self(),socket,limits,callback) 
     end
