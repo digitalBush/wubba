@@ -3,19 +3,13 @@ defmodule Wubba.Http do
 	#TODO: Add helper for generating http response? (related to above?)
 	#TODO: Figure out replacement for :proplists
 	#TODO: Figure out how to reduce passing around callback everywhere
-	#TODO: Try to remove need to pass around limits collection (replace with record?)
-	#TODO: Remove handover for now to simplify example?
-
-	def start_link(_, _, _, {nil, _args}) do
-	    raise "Callback module is required"
-	end
 
 	def start_link(server, listen_socket, limits, callback) do
 	    :proc_lib.spawn_link(__MODULE__, :accept, [server, listen_socket, limits, callback])
 	end
 
-	def accept(server, listen_socket, limits, callback) do
-	    case :gen_tcp.accept(listen_socket, limits[:accept_timeout]) do
+	def accept(server, listen_socket, Wubba.Limits[accept_timeout: accept_timeout]=limits, callback) do
+	    case :gen_tcp.accept(listen_socket, accept_timeout) do
 	        {:ok, socket} ->
 	            :gen_server.cast(server, :accepted)
 	            __MODULE__.keepalive_loop(socket, limits, callback)
@@ -44,7 +38,7 @@ defmodule Wubba.Http do
 	    end
 	end
 
-	def handle_request(socket, buffer, limits, {module, args} = callback) do
+	def handle_request(socket, buffer, limits, callback) do
 		{method, raw_path, version, b0} = get_request(socket, buffer, limits)
 	    {request_headers, b1} = get_headers(socket, version, b0, limits)
 		request = Wubba.Request.new(
@@ -56,8 +50,8 @@ defmodule Wubba.Http do
 			socket: socket, 
 			callback: callback)
 		
-
-		{request_body, b2} = get_body(socket, request_headers, b1, limits)
+		content_length = Dict.get(request_headers, "Content-Length")
+		{request_body, b2} = get_body(content_length,socket, b1, limits)
         request = request.body(request_body)
 
         response = execute_callback(request)
@@ -185,35 +179,35 @@ defmodule Wubba.Http do
 	    end
 	end
 
-	defp get_body(socket, headers, buffer, limits) do
-	    case Dict.get(headers, "Content-Length") do
-	        nil ->
-	            {<<>>, buffer}
-	        content_length_string ->
-	        	clean_content_length = String.replace(content_length_string," ","",[:global])
-	            content_length = Kernel.binary_to_integer(clean_content_length)
-	            :ok = check_max_size(socket, content_length, buffer, limits)
-
-	            case content_length - Kernel.byte_size(buffer) do
-	                0 ->
-	                    {buffer, <<>>}
-	                n when n > 0 ->
-	                    case :gen_tcp.recv(socket, n, limits[:body_timeout]) do
-	                        {:ok, data} ->
-	                            {buffer <> data, <<>>}
-	                        {:error, _} ->
-	                            :ok = :gen_tcp.close(socket)
-	                            exit(:normal)
-	                    end;
-	                _ ->
-	                    <<body :: [size(content_length), binary], rest :: binary>> = buffer
-	                    {body, rest}
-	            end
-	    end
+	defp get_body(nil,_socket,buffer,_limits) do
+		{<<>>, buffer}
 	end
 
-	defp check_max_size(socket, content_length, buffer, limits) do
-		max_body_size = limits[:max_body_size]
+	defp get_body(content_length_string,socket, buffer, Wubba.Limits[body_timeout: body_timeout]=limits) do
+    	clean_content_length = String.replace(content_length_string," ","",[:global])
+        content_length = Kernel.binary_to_integer(clean_content_length)
+        :ok = check_max_size(socket, content_length, buffer, limits)
+
+        case content_length - Kernel.byte_size(buffer) do
+            0 ->
+                {buffer, <<>>}
+            n when n > 0 ->
+                case :gen_tcp.recv(socket, n, body_timeout) do
+                    {:ok, data} ->
+                        {buffer <> data, <<>>}
+                    {:error, _} ->
+                        :ok = :gen_tcp.close(socket)
+                        exit(:normal)
+                end;
+            _ ->
+                <<body :: [size(content_length), binary], rest :: binary>> = buffer
+                {body, rest}
+        end
+
+	end
+
+	defp check_max_size(socket, content_length, buffer, Wubba.Limits[max_body_size: max_body_size]) do
+		max_body_size = max_body_size
 	    case content_length > max_body_size do
 	        true ->
 	            case content_length < max_body_size * 2 do
@@ -233,10 +227,10 @@ defmodule Wubba.Http do
 	    end
 	end
 
-	defp get_request(socket, buffer, limits) do
+	defp get_request(socket, buffer, Wubba.Limits[request_timeout: request_timeout]=limits) do
 	    case :erlang.decode_packet(:http_bin, buffer, []) do
 	        {:more, _} ->
-	            case :gen_tcp.recv(socket, 0, limits[:request_timeout]) do
+	            case :gen_tcp.recv(socket, 0, request_timeout) do
 	                {:ok, data} ->
 	                    new_buffer = buffer <> data
 	                    get_request(socket, new_buffer, limits)
@@ -269,7 +263,7 @@ defmodule Wubba.Http do
 	    exit(:normal)
 	end
 
-	defp get_headers(socket, buffer, headers, header_count, limits) do
+	defp get_headers(socket, buffer, headers, header_count, Wubba.Limits[header_timeout: header_timeout]=limits) do
 	    case :erlang.decode_packet(:httph_bin, buffer, []) do
 	        {:ok, {:http_header, _, key, _, value}, rest} ->
 	            new_headers = [{key, value} | headers]
@@ -279,7 +273,7 @@ defmodule Wubba.Http do
 	        {:ok, {:http_error, _}, rest} ->
 	            get_headers(socket, rest, headers, header_count, limits)
 	        {:more, _} ->
-	            case :gen_tcp.recv(socket, 0, limits[:header_timeout]) do
+	            case :gen_tcp.recv(socket, 0, header_timeout) do
 	                {:ok, data} ->
 	                    get_headers(socket, buffer <> data, headers, header_count, limits)
 	                {:error, _} ->

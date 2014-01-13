@@ -9,17 +9,17 @@ defmodule Wubba.Server do
     socket: nil :: :inet.socket(),
     acceptors: [] :: [pid],
     open_reqs: 0 :: non_neg_integer,
-    limits: [] :: [{any, any}],
+    limits: nil :: Wubba.Limits.t,
     callback: nil :: callback
 
 
-  def init({options,limits,callback}) do
+  def init({Wubba.Options[min_acceptors: min_acceptors] = options,limits,callback}) do
     # Use the exit signal from the acceptor processes to know when they exit
     :erlang.process_flag(:trap_exit,true)
 
     {:ok,socket} = start_listener(options)
 
-    acceptors = Enum.map 1..options[:min_acceptors], fn _ -> 
+    acceptors = Enum.map 1..min_acceptors, fn _ -> 
       Wubba.Http.start_link(self(),socket,limits,callback) 
     end
 
@@ -42,7 +42,7 @@ defmodule Wubba.Server do
 
 
   def handle_info({:EXIT, _pid, {:error, :emfile}}, State) do
-    :error_logger.error_msg('No more file descriptors, shutting down~n')
+    IO.puts("No more file descriptors, shutting down\n")
     {:stop, :emfile, state}
   end
 
@@ -51,14 +51,14 @@ defmodule Wubba.Server do
   end
 
   def handle_info({:EXIT, pid, reason}, state) do
-    :error_logger.error_msg('Elli request (pid #{pid}) unexpectedly crashed:\n#{reason}\n', [Pid, Reason])
+    IO.puts("Elli request (pid #{inspect pid}) unexpectedly crashed:\n#{inspect reason}\n")
     {:noreply, remove_acceptor(state, pid)}
   end
 
-  defp start_listener(options) do
-    :gen_tcp.listen(options[:port], [
+  defp start_listener(Wubba.Options[ip: ip, port: port]) do
+    :gen_tcp.listen(port, [
       :binary,
-      {:ip, options[:ip]},
+      {:ip, ip},
       {:reuseaddr, true},
       {:backlog, 32768},
       {:packet, :raw},
