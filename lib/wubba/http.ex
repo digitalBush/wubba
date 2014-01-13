@@ -41,14 +41,14 @@ defmodule Wubba.Http do
 	def handle_request(socket, buffer, limits, callback) do
 		{method, raw_path, version, b0} = get_request(socket, buffer, limits)
 	    {request_headers, b1} = get_headers(socket, version, b0, limits)
-		request = Wubba.Request.new(
+		request = Wubba.Request[
 			method: method, 
 			raw_path: raw_path, 
 			headers: request_headers, 
 			body: <<>>, 
 			version: version,
 			socket: socket, 
-			callback: callback)
+			callback: callback]
 		
 		content_length = Dict.get(request_headers, "Content-Length")
 		{request_body, b2} = get_body(content_length,socket, b1, limits)
