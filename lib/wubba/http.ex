@@ -41,22 +41,79 @@ defmodule Wubba.Http do
 	def handle_request(socket, buffer, limits, callback) do
 		{method, raw_path, version, b0} = get_request(socket, buffer, limits)
 	    {request_headers, b1} = get_headers(socket, version, b0, limits)
+		
+		content_length = Dict.get(request_headers, "Content-Length")
+		
+		{request_body, b2} = get_body(content_length,socket, b1, limits)
 		request = Wubba.Request[
 			method: method, 
 			raw_path: raw_path, 
 			headers: request_headers, 
-			body: <<>>, 
+			body: request_body, 
 			version: version,
 			socket: socket, 
 			callback: callback]
-		
-		content_length = Dict.get(request_headers, "Content-Length")
-		{request_body, b2} = get_body(content_length,socket, b1, limits)
-        request = request.body(request_body)
 
         response = execute_callback(request)
         handle_response(request, b2, response)
 	end
+
+	defp get_request(socket, buffer, Wubba.Limits[request_timeout: request_timeout]=limits) do
+	    case :erlang.decode_packet(:http_bin, buffer, []) do
+	        {:more, _} ->
+	            case :gen_tcp.recv(socket, 0, request_timeout) do
+	                {:ok, data} ->
+	                    new_buffer = buffer <> data
+	                    get_request(socket, new_buffer, limits)
+	                {:error, _} ->
+	                    :gen_tcp.close(socket)
+	                    exit(:normal)
+	            end
+	        {:ok, {:http_request, method, raw_path, version}, rest} ->
+	            {method, raw_path, version, rest}
+	        {:ok, {:http_error, _}, _} ->
+	            send_bad_request(socket)
+	            :gen_tcp.close(socket)
+	            exit(:normal)
+	        {:ok, {:http_response, _, _, _}, _} ->
+	            :gen_tcp.close(socket)
+	            exit(:normal)
+	    end
+	end
+
+
+	defp get_headers(_socket, {0, 9}, _, _), do: {[], <<>>}
+	defp get_headers(socket, {1, _}, buffer, limits) do
+	    get_headers(socket, buffer, [], 0, limits)
+	end
+
+	defp get_headers(socket, _, _headers, header_count, _limits) 
+	  when header_count >= 100 do
+	    send_bad_request(socket)
+	    :gen_tcp.close(socket)
+	    exit(:normal)
+	end
+
+	defp get_headers(socket, buffer, headers, header_count, Wubba.Limits[header_timeout: header_timeout]=limits) do
+	    case :erlang.decode_packet(:httph_bin, buffer, []) do
+	        {:ok, {:http_header, _, key, _, value}, rest} ->
+	            new_headers = [{key, value} | headers]
+	            get_headers(socket, rest, new_headers, header_count + 1, limits)
+	        {:ok, :http_eoh, rest} ->
+	            {headers, rest}
+	        {:ok, {:http_error, _}, rest} ->
+	            get_headers(socket, rest, headers, header_count, limits)
+	        {:more, _} ->
+	            case :gen_tcp.recv(socket, 0, header_timeout) do
+	                {:ok, data} ->
+	                    get_headers(socket, buffer <> data, headers, header_count, limits)
+	                {:error, _} ->
+	                    :gen_tcp.close(socket)
+	                    exit(:normal)
+	            end
+	    end
+	end
+
 
 	defp handle_response(request, buffer, {:response, http_code, user_headers, body}) do
 	    headers = [connection(request, user_headers), content_length(user_headers, body)| user_headers]
@@ -226,63 +283,6 @@ defmodule Wubba.Http do
 	            :ok
 	    end
 	end
-
-	defp get_request(socket, buffer, Wubba.Limits[request_timeout: request_timeout]=limits) do
-	    case :erlang.decode_packet(:http_bin, buffer, []) do
-	        {:more, _} ->
-	            case :gen_tcp.recv(socket, 0, request_timeout) do
-	                {:ok, data} ->
-	                    new_buffer = buffer <> data
-	                    get_request(socket, new_buffer, limits)
-	                {:error, _} ->
-	                    :gen_tcp.close(socket)
-	                    exit(:normal)
-	            end
-	        {:ok, {:http_request, method, raw_path, version}, rest} ->
-	            {method, raw_path, version, rest}
-	        {:ok, {:http_error, _}, _} ->
-	            send_bad_request(socket)
-	            :gen_tcp.close(socket)
-	            exit(:normal)
-	        {:ok, {:http_response, _, _, _}, _} ->
-	            :gen_tcp.close(socket)
-	            exit(:normal)
-	    end
-	end
-
-
-	defp get_headers(_socket, {0, 9}, _, _), do: {[], <<>>}
-	defp get_headers(socket, {1, _}, buffer, limits) do
-	    get_headers(socket, buffer, [], 0, limits)
-	end
-
-	defp get_headers(socket, _, _headers, header_count, _limits) 
-	  when header_count >= 100 do
-	    send_bad_request(socket)
-	    :gen_tcp.close(socket)
-	    exit(:normal)
-	end
-
-	defp get_headers(socket, buffer, headers, header_count, Wubba.Limits[header_timeout: header_timeout]=limits) do
-	    case :erlang.decode_packet(:httph_bin, buffer, []) do
-	        {:ok, {:http_header, _, key, _, value}, rest} ->
-	            new_headers = [{key, value} | headers]
-	            get_headers(socket, rest, new_headers, header_count + 1, limits)
-	        {:ok, :http_eoh, rest} ->
-	            {headers, rest}
-	        {:ok, {:http_error, _}, rest} ->
-	            get_headers(socket, rest, headers, header_count, limits)
-	        {:more, _} ->
-	            case :gen_tcp.recv(socket, 0, header_timeout) do
-	                {:ok, data} ->
-	                    get_headers(socket, buffer <> data, headers, header_count, limits)
-	                {:error, _} ->
-	                    :gen_tcp.close(socket)
-	                    exit(:normal)
-	            end
-	    end
-	end
-
 
 	defp send_bad_request(socket) do
 	    body = "Bad Request"
