@@ -61,23 +61,17 @@ defmodule Wubba.Http do
 	defp get_request(socket, buffer, Wubba.Limits[request_timeout: request_timeout]=limits) do
 	    case :erlang.decode_packet(:http_bin, buffer, []) do
 	        {:more, _} ->
-	            case :gen_tcp.recv(socket, 0, request_timeout) do
-	                {:ok, data} ->
-	                    new_buffer = buffer <> data
-	                    get_request(socket, new_buffer, limits)
-	                {:error, _} ->
-	                    :gen_tcp.close(socket)
-	                    exit(:normal)
-	            end
+            	receive socket,0,request_timeout,fn(data)->
+            			new_buffer = buffer <> data
+                        get_request(socket, new_buffer, limits)
+                end
 	        {:ok, {:http_request, method, raw_path, version}, rest} ->
 	            {method, raw_path, version, rest}
 	        {:ok, {:http_error, _}, _} ->
 	            send_bad_request(socket)
-	            :gen_tcp.close(socket)
-	            exit(:normal)
+	            close_and_exit(socket)
 	        {:ok, {:http_response, _, _, _}, _} ->
-	            :gen_tcp.close(socket)
-	            exit(:normal)
+	            close_and_exit(socket)
 	    end
 	end
 
@@ -90,8 +84,7 @@ defmodule Wubba.Http do
 	defp get_headers(socket, _, _headers, header_count, _limits) 
 	  when header_count >= 100 do
 	    send_bad_request(socket)
-	    :gen_tcp.close(socket)
-	    exit(:normal)
+	    close_and_exit(socket)
 	end
 
 	defp get_headers(socket, buffer, headers, header_count, Wubba.Limits[header_timeout: header_timeout]=limits) do
@@ -104,13 +97,10 @@ defmodule Wubba.Http do
 	        {:ok, {:http_error, _}, rest} ->
 	            get_headers(socket, rest, headers, header_count, limits)
 	        {:more, _} ->
-	            case :gen_tcp.recv(socket, 0, header_timeout) do
-	                {:ok, data} ->
-	                    get_headers(socket, buffer <> data, headers, header_count, limits)
-	                {:error, _} ->
-	                    :gen_tcp.close(socket)
-	                    exit(:normal)
-	            end
+        		receive socket,0,header_timeout,fn(data)->
+    				get_headers(socket, buffer <> data, headers, header_count, limits)
+        	    end
+
 	    end
 	end
 
@@ -127,13 +117,9 @@ defmodule Wubba.Http do
             0 ->
                 {buffer, <<>>}
             n when n > 0 ->
-                case :gen_tcp.recv(socket, n, body_timeout) do
-                    {:ok, data} ->
-                        {buffer <> data, <<>>}
-                    {:error, _} ->
-                        :ok = :gen_tcp.close(socket)
-                        exit(:normal)
-                end;
+	    		receive socket,n,body_timeout,fn(data)->
+					{buffer <> data, <<>>}
+	    	    end
             _ ->
                 <<body :: [size(content_length), binary], rest :: binary>> = buffer
                 {body, rest}
@@ -284,7 +270,19 @@ defmodule Wubba.Http do
 	    end
 	end
 
-	
+	defp receive(socket,bytes,timeout,data_fn) do
+		case :gen_tcp.recv(socket, bytes, timeout) do
+		    {:ok, data} ->
+		        data_fn.(data)
+		    {:error, _} ->
+		        close_and_exit(socket)
+		end
+	end
+
+	defp close_and_exit(socket) do
+		:gen_tcp.close(socket)
+		exit(:normal)
+	end
 
 	defp send_bad_request(socket) do
 	    body = "Bad Request"
