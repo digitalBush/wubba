@@ -1,7 +1,6 @@
 defmodule Wubba.Http do
 	#TODO: Break this into Request Processing / Response Delivery modules?
 	#TODO: Add helper for generating http response? (related to above?)
-	#TODO: Figure out replacement for :proplists
 	#TODO: Figure out how to reduce passing around callback everywhere
 
 	def start_link(server, listen_socket, limits, callback) do
@@ -214,18 +213,18 @@ defmodule Wubba.Http do
 
 
 	defp connection(request, headers) do
-	    case :proplists.get_value("Connection", headers) do
-	        :undefined ->
-	            {"Connection", connection_token(request)}
-	        _ ->
-	            []
+	    case Dict.get(headers,"Connection") do
+	        :nil -> {"Connection", connection_token(request)}
+	        _    -> []
 	    end
 	end
 
 	#TODO: speed improvement here?
 	defp encode_headers([]), do: []
 	defp encode_headers([[] | tail]), do: encode_headers(tail)
-	defp encode_headers([{key, value} | tail]), do: [encode_value(key), ": ", encode_value(value), "\r\n", encode_headers(tail)]
+	defp encode_headers([{key, value} | tail]) do
+		[encode_value(key), ": ", encode_value(value), "\r\n", encode_headers(tail)]
+	end
 
 
 	defp encode_value(value) when is_integer(value), do: integer_to_binary(value)
@@ -243,30 +242,28 @@ defmodule Wubba.Http do
 	defp connection_token(Wubba.Request[version: {1, 0}, headers: headers]) do
 	    case Dict.get(headers,"Connection") do
 	        "Keep-Alive" -> "Keep-Alive"
-	        _                -> "close"
+	        _            -> "close"
 	    end
 	end
 
 	defp connection_token(_request), do: "close"
 
 	defp close_or_keepalive(request, headers) do
-	    case :proplists.get_value("Connection", headers) do
-	        :undefined ->
+	    case Dict.get(headers, "Connection") do
+	        nil ->
 	            case connection_token(request) do
 	                "Keep-Alive" -> :keep_alive
 	                "close"      -> :close
 	            end
-	        "close" -> :close
+	        "close"      -> :close
 	        "Keep-Alive" -> :keep_alive
 	    end
 	end
 
 	defp content_length(headers, body) do
-	    case :proplists.is_defined("Content-Length", headers) do
-	        true ->
-	            []
-	        false ->
-	            {"Content-Length", iolist_size(body)}
+	    case Dict.has_key?(headers, "Content-Length") do
+	        true  -> []
+	        false -> {"Content-Length", iolist_size(body)}
 	    end
 	end
 
@@ -346,7 +343,4 @@ defmodule Wubba.Http do
 	defp status(507),do: "507 Insufficient Storage"
 	defp status(510),do: "510 Not Extended"
 	defp status(b) when is_binary(b), do: b
-
-
-
 end
