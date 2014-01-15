@@ -41,10 +41,10 @@ defmodule Wubba.Http do
 	def handle_request(socket, buffer, limits, callback) do
 		{method, raw_path, version, b0} = get_request(socket, buffer, limits)
 	    {request_headers, b1} = get_headers(socket, version, b0, limits)
-		
 		content_length = Dict.get(request_headers, "Content-Length")
 		
 		{request_body, b2} = get_body(content_length,socket, b1, limits)
+
 		request = Wubba.Request[
 			method: method, 
 			raw_path: raw_path, 
@@ -82,9 +82,9 @@ defmodule Wubba.Http do
 	end
 
 
-	defp get_headers(_socket, {0, 9}, _, _), do: {[], <<>>}
+	defp get_headers(_socket, {0, 9}, _, _), do: {ListDict.new(), <<>>}
 	defp get_headers(socket, {1, _}, buffer, limits) do
-	    get_headers(socket, buffer, [], 0, limits)
+	    get_headers(socket, buffer, ListDict.new(), 0, limits)
 	end
 
 	defp get_headers(socket, _, _headers, header_count, _limits) 
@@ -97,7 +97,7 @@ defmodule Wubba.Http do
 	defp get_headers(socket, buffer, headers, header_count, Wubba.Limits[header_timeout: header_timeout]=limits) do
 	    case :erlang.decode_packet(:httph_bin, buffer, []) do
 	        {:ok, {:http_header, _, key, _, value}, rest} ->
-	            new_headers = [{key, value} | headers]
+	            new_headers = Dict.put(headers,key,value)
 	            get_headers(socket, rest, new_headers, header_count + 1, limits)
 	        {:ok, :http_eoh, rest} ->
 	            {headers, rest}
@@ -111,6 +111,75 @@ defmodule Wubba.Http do
 	                    :gen_tcp.close(socket)
 	                    exit(:normal)
 	            end
+	    end
+	end
+
+	defp get_body(nil,_socket,buffer,_limits) do
+		{<<>>, buffer}
+	end
+
+	defp get_body(content_length_string,socket, buffer, Wubba.Limits[body_timeout: body_timeout]=limits) do
+    	clean_content_length = String.replace(content_length_string," ","",[:global])
+        content_length = binary_to_integer(clean_content_length)
+        :ok = check_max_size(socket, content_length, buffer, limits)
+
+        case content_length - byte_size(buffer) do
+            0 ->
+                {buffer, <<>>}
+            n when n > 0 ->
+                case :gen_tcp.recv(socket, n, body_timeout) do
+                    {:ok, data} ->
+                        {buffer <> data, <<>>}
+                    {:error, _} ->
+                        :ok = :gen_tcp.close(socket)
+                        exit(:normal)
+                end;
+            _ ->
+                <<body :: [size(content_length), binary], rest :: binary>> = buffer
+                {body, rest}
+        end
+
+	end
+
+	defp check_max_size(socket, content_length, buffer, Wubba.Limits[max_body_size: max_body_size]) do
+	    case content_length > max_body_size do
+	        true ->
+	            case content_length < max_body_size * 2 do
+	                true ->
+	                    remaining_bytes = content_length - size(buffer)
+	                    :gen_tcp.recv(socket, remaining_bytes, 60000)
+	                    response = ["HTTP/1.1 ", status(413), "\r\n",
+	                                "Content-Length: 0", "\r\n\r\n"]
+	                    :gen_tcp.send(socket, response)
+	                    :gen_tcp.close(socket)
+	                false ->
+	                    :gen_tcp.close(socket)
+	            end
+	            exit(:normal)
+	        false ->
+	            :ok
+	    end
+	end
+
+	defp execute_callback(Wubba.Request[callback: {module,arguments}] = request) do
+	    try do
+	    	case module.handle(request, arguments) do
+		        {:ok, headers, {:file, file_name}}       -> {:file, 200, headers, file_name, {0, 0}}
+		        {:ok, headers, {:file, file_name, range}}-> {:file, 200, headers, file_name, range}
+		        {:ok, headers, body}                   -> {:response, 200, headers, body}
+		        {:ok, body}                            -> {:response, 200, [], body}
+		        {http_code, headers, {:file, file_name}} ->
+		            {:file, http_code, headers, file_name, {0, 0}}
+		        {http_code, headers, {:file, file_name, range}} ->
+		            {:file, http_code, headers, file_name, range}
+		        {http_code, headers, body}             -> {:response, http_code, headers, body}
+		        {http_code, body}                      -> {:response, http_code, [], body}
+		    end
+	    catch
+	        :throw, {http_code, headers, body} when is_integer(http_code) ->
+	            {:response, http_code, headers, body}
+	        _, _ ->
+	            {:response, 500, [], "Internal server error"}
 	    end
 	end
 
@@ -167,17 +236,18 @@ defmodule Wubba.Http do
 	    end
 	end
 
+	#TODO: speed improvement here?
 	defp encode_headers([]), do: []
 	defp encode_headers([[] | tail]), do: encode_headers(tail)
 	defp encode_headers([{key, value} | tail]), do: [encode_value(key), ": ", encode_value(value), "\r\n", encode_headers(tail)]
 
 
-	defp encode_value(value) when is_integer(value), do: Kernel.integer_to_list(value)
+	defp encode_value(value) when is_integer(value), do: integer_to_binary(value)
 	defp encode_value(value) when is_binary(value), do: value
-	defp encode_value(value) when is_list(value), do: Kernel.list_to_bitstring(value)
+	defp encode_value(value) when is_list(value), do: String.from_char_list!(value)
 
 	defp connection_token(Wubba.Request[version: {1, 1}, headers: headers]) do
-	    case :proplists.get_value("Connection", headers) do
+	    case Dict.get(headers,"Connection") do
 	        "close" -> "close"
 	        "Close" -> "close"
 	        _       -> "Keep-Alive"
@@ -185,7 +255,7 @@ defmodule Wubba.Http do
 	end
 
 	defp connection_token(Wubba.Request[version: {1, 0}, headers: headers]) do
-	    case :proplists.get_value("Connection", headers) do
+	    case Dict.get(headers,"Connection") do
 	        "Keep-Alive" -> "Keep-Alive"
 	        _                -> "close"
 	    end
@@ -214,75 +284,7 @@ defmodule Wubba.Http do
 	    end
 	end
 
-	defp execute_callback(Wubba.Request[callback: {module,arguments}] = request) do
-	    try do
-	    	case module.handle(request, arguments) do
-		        {:ok, headers, {:file, file_name}}       -> {:file, 200, headers, file_name, {0, 0}}
-		        {:ok, headers, {:file, file_name, range}}-> {:file, 200, headers, file_name, range}
-		        {:ok, headers, body}                   -> {:response, 200, headers, body}
-		        {:ok, body}                            -> {:response, 200, [], body}
-		        {http_code, headers, {:file, file_name}} ->
-		            {:file, http_code, headers, file_name, {0, 0}}
-		        {http_code, headers, {:file, file_name, range}} ->
-		            {:file, http_code, headers, file_name, range}
-		        {http_code, headers, body}             -> {:response, http_code, headers, body}
-		        {http_code, body}                      -> {:response, http_code, [], body}
-		    end
-	    catch
-	        :throw, {http_code, headers, body} when is_integer(http_code) ->
-	            {:response, http_code, headers, body}
-	        _, _ ->
-	            {:response, 500, [], "Internal server error"}
-	    end
-	end
-
-	defp get_body(nil,_socket,buffer,_limits) do
-		{<<>>, buffer}
-	end
-
-	defp get_body(content_length_string,socket, buffer, Wubba.Limits[body_timeout: body_timeout]=limits) do
-    	clean_content_length = String.replace(content_length_string," ","",[:global])
-        content_length = Kernel.binary_to_integer(clean_content_length)
-        :ok = check_max_size(socket, content_length, buffer, limits)
-
-        case content_length - Kernel.byte_size(buffer) do
-            0 ->
-                {buffer, <<>>}
-            n when n > 0 ->
-                case :gen_tcp.recv(socket, n, body_timeout) do
-                    {:ok, data} ->
-                        {buffer <> data, <<>>}
-                    {:error, _} ->
-                        :ok = :gen_tcp.close(socket)
-                        exit(:normal)
-                end;
-            _ ->
-                <<body :: [size(content_length), binary], rest :: binary>> = buffer
-                {body, rest}
-        end
-
-	end
-
-	defp check_max_size(socket, content_length, buffer, Wubba.Limits[max_body_size: max_body_size]) do
-		max_body_size = max_body_size
-	    case content_length > max_body_size do
-	        true ->
-	            case content_length < max_body_size * 2 do
-	                true ->
-	                    remaining_bytes = content_length - size(buffer)
-	                    :gen_tcp.recv(socket, remaining_bytes, 60000)
-	                    response = ["HTTP/1.1 ", status(413), "\r\n",
-	                                "Content-Length: 0", "\r\n\r\n"]
-	                    :gen_tcp.send(socket, response)
-	                    :gen_tcp.close(socket)
-	                false ->
-	                    :gen_tcp.close(socket)
-	            end
-	            exit(:normal)
-	        false ->
-	            :ok
-	    end
-	end
+	
 
 	defp send_bad_request(socket) do
 	    body = "Bad Request"
