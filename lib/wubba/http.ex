@@ -44,9 +44,12 @@ defmodule Wubba.Http do
 		
 		{request_body, b2} = get_body(content_length,socket, b1, limits)
 
+		{:ok,{raw_path, path, args}} = Wubba.Utils.parse_path(raw_path)
 		request = Wubba.Request[
 			method: method, 
 			raw_path: raw_path, 
+			path: path,
+			args: args,
 			headers: request_headers, 
 			body: request_body, 
 			version: version,
